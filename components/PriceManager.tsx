@@ -180,28 +180,6 @@ const PriceManager: React.FC<PriceManagerProps> = ({ methods, setMethods }) => {
     setMethods(newMethods);
   };
 
-  // --- 智能辅助功能 ---
-  
-  const autoFixTiers = (sizeId: string, tiers: SizeConfig['tiers']) => {
-    // 1. 按 MinQty 排序
-    const sorted = [...tiers].sort((a, b) => a.minQty - b.minQty);
-    
-    // 2. 修正接缝
-    const fixed = sorted.map((tier, idx) => {
-      if (idx === 0) {
-        return { ...tier, minQty: 1 };
-      }
-      const prevTier = sorted[idx - 1];
-      // 如果上一级是无限大，这级其实是无效的，但为了逻辑严谨，我们先处理数字
-      if (typeof prevTier.maxQty === 'number') {
-        return { ...tier, minQty: prevTier.maxQty + 1 };
-      }
-      return tier;
-    });
-
-    updateSizeField(sizeId, 'tiers', fixed);
-  };
-
   return (
     <div className="grid grid-cols-12 gap-8 h-[calc(100vh-200px)]">
       {/* 左侧列表 */}
@@ -428,20 +406,20 @@ const PriceManager: React.FC<PriceManagerProps> = ({ methods, setMethods }) => {
                          <span className="text-[10px] font-black text-purple-500 uppercase bg-purple-50 px-2 py-1 rounded">
                            混合阶梯表
                          </span>
-                         {/* 自动衔接按钮 */}
-                         {size.tiers.length > 1 && (
-                            <button 
-                              onClick={() => autoFixTiers(size.id, size.tiers)}
-                              className="text-[10px] text-green-600 font-bold bg-green-50 px-2 py-0.5 rounded ml-2 hover:bg-green-100 cursor-pointer"
-                              title="自动修正阶梯数值，使首尾相连"
-                            >
-                              ⚡ 自动衔接
-                            </button>
-                         )}
                       </div>
                       <button 
                         onClick={() => {
-                          const newTiers = [...size.tiers, { minQty: 1, maxQty: '∞', price: 0, mode: 'unit' }];
+                          const lastTier = size.tiers[size.tiers.length - 1];
+                          let nextMin = 1;
+                          if (lastTier) {
+                            if (typeof lastTier.maxQty === 'number') {
+                                nextMin = lastTier.maxQty + 1;
+                            } else {
+                                // 如果上一级已经是无穷大，虽然逻辑上不能加，但为了兼容用户调整，默认加个跨度
+                                nextMin = lastTier.minQty + 1000;
+                            }
+                          }
+                          const newTiers = [...size.tiers, { minQty: nextMin, maxQty: '∞', price: 0, mode: 'unit' }];
                           updateSizeField(size.id, 'tiers', newTiers);
                         }}
                         className="text-purple-600 text-[10px] font-bold bg-purple-50 px-3 py-1.5 rounded-lg hover:bg-purple-100 transition-colors cursor-pointer"
@@ -462,12 +440,17 @@ const PriceManager: React.FC<PriceManagerProps> = ({ methods, setMethods }) => {
                           <div className="flex items-center bg-gray-50 rounded-lg px-3 py-1 border border-gray-100">
                              <input 
                                type="number" 
-                               className="w-16 bg-transparent text-center font-bold outline-none text-xs"
+                               className={`w-16 bg-transparent text-center font-bold outline-none text-xs ${idx > 0 ? 'text-gray-400 cursor-not-allowed' : ''}`}
                                value={tier.minQty}
+                               readOnly={idx > 0} // 锁定除第一级外的起始值，确保连续性
+                               title={idx > 0 ? "自动跟随上一级结束值" : ""}
                                onChange={e => {
-                                 const newTiers = [...size.tiers];
-                                 newTiers[idx].minQty = Number(e.target.value);
-                                 updateSizeField(size.id, 'tiers', newTiers);
+                                 // 仅允许修改第一级的起始值
+                                 if (idx === 0) {
+                                     const newTiers = [...size.tiers];
+                                     newTiers[idx].minQty = Number(e.target.value);
+                                     updateSizeField(size.id, 'tiers', newTiers);
+                                 }
                                }}
                              />
                              <span className="text-gray-300 mx-2">~</span>
@@ -475,8 +458,15 @@ const PriceManager: React.FC<PriceManagerProps> = ({ methods, setMethods }) => {
                                className="w-16 bg-transparent text-center font-bold outline-none text-xs"
                                value={tier.maxQty}
                                onChange={e => {
+                                 const val = e.target.value === '∞' ? '∞' : Number(e.target.value);
                                  const newTiers = [...size.tiers];
-                                 newTiers[idx].maxQty = e.target.value === '∞' ? '∞' : Number(e.target.value);
+                                 newTiers[idx].maxQty = val;
+                                 
+                                 // 自动更新下一级的起始值 (强关联)
+                                 if (typeof val === 'number' && newTiers[idx + 1]) {
+                                     newTiers[idx + 1].minQty = val + 1;
+                                 }
+
                                  updateSizeField(size.id, 'tiers', newTiers);
                                }}
                              />
@@ -512,6 +502,17 @@ const PriceManager: React.FC<PriceManagerProps> = ({ methods, setMethods }) => {
                           <button 
                             onClick={() => {
                               const newTiers = size.tiers.filter((_, i) => i !== idx);
+                              // 删除行时，需要重新修正后续行的minQty，这里简单处理，建议用户从下往上删
+                              // 为了保证数据的绝对正确，如果删除了中间行，下一行的MinQty需要继承上一行Max+1
+                              if (idx < newTiers.length && idx > 0) {
+                                 const prevMax = newTiers[idx-1].maxQty;
+                                 if (typeof prevMax === 'number') {
+                                    newTiers[idx].minQty = prevMax + 1;
+                                 }
+                              } else if (idx === 0 && newTiers.length > 0) {
+                                 newTiers[0].minQty = 1; // 删了第一行，新的第一行归1
+                              }
+
                               updateSizeField(size.id, 'tiers', newTiers);
                             }}
                             className="text-gray-300 hover:text-red-500 px-2 opacity-0 group-hover/tier:opacity-100 transition-opacity cursor-pointer"
